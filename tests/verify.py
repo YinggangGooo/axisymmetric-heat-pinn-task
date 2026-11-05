@@ -13,6 +13,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+import sys
+sys.path.insert(0,str(Path(__file__).parent))
+import runtime_guard as guard
 
 LOG = Path('/logs/verifier')
 HERE = Path(__file__).parent
@@ -23,14 +26,12 @@ WEIGHTS = {'environment': .10, 'cylindrical_operator': .25, 'top_boundary': .25,
 # and independently verified end-to-end predictions each carry 20%.
 PREAMBLE = '''import sys, json
 sys.path.insert(0, '/app')
+sys.path.append('/app/.deps')
 '''
 
 
 def candidate(code, timeout=90):
-    run = subprocess.run(['/usr/sbin/runuser', '-u', 'agent', '--',
-                          '/opt/venv/bin/python', '-I', '-'],
-                         input=PREAMBLE + code, text=True, capture_output=True,
-                         cwd='/app', timeout=timeout)
+    run = guard.execute(code=PREAMBLE + code,timeout=timeout)
     if run.returncode:
         raise AssertionError(run.stderr[-3000:] or run.stdout[-3000:] or 'candidate exited unsuccessfully')
     lines = [line[len('RESULT:'):] for line in run.stdout.splitlines() if line.startswith('RESULT:')]
@@ -113,8 +114,56 @@ print('RESULT:'+json.dumps(out))
         raise AssertionError('Violated top boundary was reported as satisfied')
     if any(abs(value)>max(scale*1e-7,1e-300) for row in values[:3] for value in row):
         raise AssertionError('A satisfied top boundary has a nonzero residual')
+    integration=training_boundary()
     return {'satisfied_fields':3,'violating_fields':3,'radii':4,
-            'equivalent_sign_and_scaling_accepted':True}
+            'equivalent_sign_and_scaling_accepted':True,'training_integration':integration}
+
+
+def training_boundary():
+    result=candidate('''
+import torch
+import baseline_models as bm
+torch.set_default_dtype(torch.float64)
+class Net(torch.nn.Module):
+    def __init__(self,values):
+        super().__init__();self.w=torch.nn.Parameter(torch.tensor(values))
+    def forward(self,x):
+        return self.w[0]*x[:,:1]**2+self.w[1]*x[:,1:2]**2+self.w[2]
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__();self.cu=Net([.013,.021,300.]);self.ox=Net([.017,.028,310.])
+        self.spec={'xpinn':False};self.cfg={'physics':{'R_Cu':2.5,'R_out':3.,'H':25.,
+            'T_top':380.,'T_bottom':300.,'k_Cu':400.,'k_SiO2':1.4,'pde_eps':1e-4}}
+model=Model()
+samples={key:__import__('numpy').array([[.3,2.],[1.1,7.],[2.7,19.]])
+         for key in ['cu','ox','top_cu','top_ox','bottom_cu','bottom_ox','axis','outer','interface']}
+samples['top_cu'][:,1]=25.;samples['top_ox'][:,1]=25.
+samples['bottom_cu'][:,1]=0.;samples['bottom_ox'][:,1]=0.
+physics=bm.PhysicsLoss(model,samples)
+params=list(model.parameters())
+first=physics.components()['dir']
+g1=torch.autograd.grad(first,params,allow_unused=True)
+original=bm.top_residual
+penalty=sum(original(net,*physics.points[key],model.cfg['physics']).square().mean()
+            for net,key in [(model.cu,'top_cu'),(model.ox,'top_ox')])
+gp=torch.autograd.grad(penalty,params,allow_unused=True)
+bm.top_residual=lambda net,r,z,p:2*original(net,r,z,p)
+second=physics.components()['dir'];g2=torch.autograd.grad(second,params,allow_unused=True)
+def vector(items):
+    return torch.cat([torch.zeros_like(p).reshape(-1) if g is None else g.reshape(-1)
+                      for p,g in zip(params,items)]).detach().tolist()
+print('RESULT:'+json.dumps({'loss_before':float(first),'loss_after':float(second),
+                          'top_penalty':float(penalty),'grad_before':vector(g1),
+                          'grad_after':vector(g2),'grad_penalty':vector(gp)}))
+''')
+    assert math.isfinite(result['top_penalty']) and result['top_penalty']>0
+    assert math.isclose(result['loss_after']-result['loss_before'],3*result['top_penalty'],rel_tol=1e-7,abs_tol=1e-6), 'Top residual is absent from the training loss'
+    g1,g2,gp=[result[k] for k in ('grad_before','grad_after','grad_penalty')]
+    assert len(g1)==len(g2)==len(gp)==6
+    assert any(abs(v)>1e-9 for v in gp), 'Top constraint has no parameter gradient'
+    assert all(math.isfinite(v) for values in (g1,g2,gp) for v in values)
+    assert all(math.isclose(b-a,3*c,rel_tol=1e-6,abs_tol=1e-5) for a,b,c in zip(g1,g2,gp)), 'Top loss is detached from training gradients'
+    return {'loss_and_parameter_gradients_checked':True}
 
 
 def reported_errors(prediction,reference,radii):
@@ -182,13 +231,14 @@ def fresh_training_fem():
         writer=csv.writer(f); writer.writerow(['r_um','z_um'])
         writer.writerows(row[:2] for row in data)
     config=work/'config.json'
-    shutil.copyfile(HERE/'evaluation_config.json',config)
-    output=work/'output'; output.mkdir(); os.chown(output,1000,1000)
-    args=['/usr/sbin/runuser','-u','agent','--','/opt/venv/bin/python','-I','/app/run_case.py',
-          '--points',str(coords),'--config',str(config),'--output',str(output),'--seed','42','--device','cpu']
-    # -I deliberately omits /app; the entry point adds its own script directory.
+    shutil.copyfile('/opt/benchmark/protocol.json',config)
+    output=work/'output'; output.mkdir(); os.chown(output,guard.RUNTIME_UID,guard.RUNTIME_UID)
+    args=['/app/run_case.py','--points',str(coords),'--config',str(config),
+          '--output',str(output),'--seed','42','--device','cpu']
     started=time.monotonic()
-    run=subprocess.run(args,cwd='/app',capture_output=True,text=True,timeout=6600)
+    run=guard.execute(args=args,timeout=6600)
+    wall_seconds=time.monotonic()-started
+    guard.freeze_tree(output)
     (LOG/'training-stdout.txt').write_text(run.stdout,encoding='utf-8')
     (LOG/'training-stderr.txt').write_text(run.stderr,encoding='utf-8')
     if run.returncode:
@@ -214,22 +264,16 @@ def fresh_training_fem():
                              f'independent pointwise max {max(errors):.9f}% (limit 0.1%)')
     if max(reported)>0.1:
         raise AssertionError('Program-reported maximum error exceeds 0.1%')
-    if not (output/'model_final.pt').is_file():
-        raise AssertionError('Fresh trained checkpoint is required')
-    # Confirm CSV predictions really match the submitted single-network checkpoint.
-    check=candidate('''
-import torch, numpy as np
-from baseline_models import BaselineModel
-from pathlib import Path
-folder=Path('''+repr(str(output))+''')
-receipt=torch.load(folder/'model_final.pt',map_location='cpu',weights_only=True)
-model=BaselineModel('StandardPINN',receipt['config'],42,'cpu')
-model.load_state_dict(receipt['model_state'])
-d=np.loadtxt(folder/'prediction.csv',delimiter=',',skiprows=1,ndmin=2)[::137]
-err=np.max(np.abs(model.predict(d[:,0],d[:,1])-d[:,2]))
-assert np.isfinite(err) and err<2e-3
-print('RESULT:'+json.dumps({'checkpoint_max_discrepancy_K':float(err)}))
-''')
+    for filename in ('model_final.npz','run.json','training_history.json','prediction.csv'):
+        path=output/filename
+        if path.is_symlink() or not path.is_file() or path.stat().st_size>50_000_000:
+            raise AssertionError('Missing or unsafe output artifact: '+filename)
+    audit=guard.execute(code=(HERE/'audit_checkpoint.py').read_text(),user='auditor',timeout=120,
+                        args=['--output',str(output),'--config',str(config),'--points',str(coords),
+                              '--wall-seconds',str(wall_seconds)])
+    if audit.returncode:
+        raise AssertionError('Independent checkpoint/run audit failed: '+audit.stderr[-2500:])
+    check=json.loads(audit.stdout)
     shutil.copyfile(output/'run.json',LOG/'fresh-run.json')
     return {'points':len(errors),'max_pointwise_relative_error_percent':max(errors),
             'program_reported_max_relative_error_percent':max(reported),'max_error_limit_percent':.1,
@@ -248,6 +292,7 @@ def main():
     args=parser.parse_args()
     LOG.mkdir(parents=True,exist_ok=True)
     os.chmod(LOG,0o700)
+    guard.prepare()
     diagnostic=args.diagnostic is not None
     if not diagnostic:
         (LOG/'reward.txt').write_text('0\n')

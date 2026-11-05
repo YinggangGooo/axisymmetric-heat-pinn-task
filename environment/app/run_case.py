@@ -8,6 +8,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent / '.deps'))
 import numpy as np
 import torch
 from baseline_models import BaselineModel, make_samples, train_model
@@ -30,6 +31,10 @@ def main():
     model = BaselineModel('StandardPINN', cfg, args.seed, args.device)
     history, elapsed, evaluations = train_model(model, samples, args.output, args.seed,
                                                {'purpose': 'fresh repair evaluation'})
+    np.savez_compressed(args.output/'model_final.npz',
+                        **{key:value.detach().cpu().numpy() for key,value in model.state_dict().items()})
+    (args.output/'training_history.json').write_text(
+        json.dumps(history,allow_nan=False),encoding='utf-8')
     coords = np.loadtxt(args.points, delimiter=',', skiprows=1, ndmin=2)
     if coords.shape[1] != 2 or not np.isfinite(coords).all():
         raise ValueError('Expected finite r_um,z_um coordinates')

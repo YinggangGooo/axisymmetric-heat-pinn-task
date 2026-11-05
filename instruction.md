@@ -16,10 +16,10 @@
 
 ## 需要保留的接口与入口
 
-`baseline_models.py` 中保留 `BaselineModel`、`make_samples`、`train_model` 及以下可独立调用的公共函数：
+`baseline_models.py` 中保留 `BaselineModel`、`make_samples`、`train_model`、`PhysicsLoss.components` 及以下可独立调用的公共函数：
 
 1. `pde_residual(net, r, z, eps)`：对任意可微温度场返回逐点轴对称导热残差，形状为 `(N,1)`。`eps` 为兼容旧调用保留的参数；由于调用限定 `r>0`，不能以它改变该算子的数学定义。
-2. `top_residual(net, r, z, physics)`：返回顶部采样点的边界约束残差，形状为 `(N,1)`，并用于训练中的顶部边界损失。残差的零点应对应所述物理边界；接受等价的符号、缩放及残差定义。
+2. `top_residual(net, r, z, physics)`：返回顶部采样点的边界约束残差，形状为 `(N,1)`，并用于训练中的顶部边界损失。该残差须可微，梯度能回传网络参数；`PhysicsLoss.components()` 的 `dir` 分项保留各端面残差均方和的定义。残差的零点应对应所述物理边界；接受等价的符号、缩放及残差定义。
 3. `error_metrics.relative_errors(prediction, reference, radii)`：接收等形的预测温度、有限元参考温度和半径数组，返回等形的逐点百分比相对误差。温度均为有限的绝对温度，参考温度为正。评价以每个点对应的有限元参考温度为基准，取全部点的最大逐点相对误差作为精度门槛；保留现有调用签名。
 4. `error_metrics.interpolate_reference(points, temperatures, query)`：保留基于 SciPy 的二维散点温度插值功能，返回查询点的温度。它属于实际后处理流水线。
 
@@ -30,11 +30,15 @@ python /app/run_case.py --points /path/to/coordinates.csv --config /path/to/conf
   --output /path/to/new-output --seed 42 --device cpu
 ```
 
-坐标 CSV 首行为 `r_um,z_um`。输出 `prediction.csv` 的表头必须是 `r_um,z_um,temperature_K`，每个输入坐标对应一行，保持坐标与顺序，所有数值有限。另保存能由 `BaselineModel` 加载的 `model_final.pt`，以及训练过程的 `run.json`。
+坐标 CSV 首行为 `r_um,z_um`。输出 `prediction.csv` 的表头必须是 `r_um,z_um,temperature_K`，每个输入坐标对应一行，保持坐标与顺序，所有数值有限。另保存只含数值权重的 `model_final.npz`、逐次训练记录 `training_history.json` 和 `run.json`。NPZ键名沿用现有 `BaselineModel.state_dict()`（含 `cu.net.*` 与 `ox.net.*`），值为有限float32数组；两个材料共用同一网络。验证器按公开网络结构独立重建模型，对全部坐标核对权重预测与CSV，容差2e-3 K。可额外保存原PT文件，但它不作为可信权重输入。
+
+`run.json` 保留 `seed`、`device`、`steps`、`loss_evaluations`、`training_seconds`、`total_seconds`、`final_loss` 字段。种子、CPU设备和总步数须符合公开协议，计数和末次损失须与完整训练记录一致，耗时须非负且不超过实际运行墙钟时间。训练记录沿用现有每轮history字段，完整记录每次Adam更新和L-BFGS外层调用。
 
 `run_case.py` 必须从头训练 StandardPINN（一个跨两种材料共享的网络）；保留配置中的五层、每层64节点、SiLU架构及公开训练协议。可以修复实现和增加辅助函数，但不要修改输入配置、训练预算、采样规模或入口。不能使用外部预训练权重、读取私有评分材料、修改验证器或直接写入成绩。
 
-运行环境为 Python 3.11、CPU 2 核、内存 4 GiB。运行所需版本列在 `/app/requirements.txt`；环境中并非所有必要运行依赖都已正确安装，请按需修复。使用 `/opt/venv/bin/python` 对应的环境即可，无需 CUDA、COMSOL 软件或无关开发工具。
+运行环境为 Python 3.11、CPU 2 核、内存 4 GiB。运行所需版本列在 `/app/requirements.txt`；环境中并非所有必要运行依赖都已正确安装，请按需修复。基础解释器与核心依赖为root所有的只读运行时，不可修改。缺失依赖的固定版本wheel已存放在 `/opt/wheels`，可使用pip的离线安装方式写入 `/app/.deps`；该目录会由运行入口加载。验收工作进程禁止建立外部网络连接；作答代理自身安装和模型调用的联网由平台管理。不得通过公开仓库等外部来源读取本题参考解或验证材料。无需CUDA、COMSOL软件或无关工具。
+
+验收开始时会终止作答用户遗留进程，并冻结 `/app` 下的作答源码与依赖，再以独立低权限执行用户运行候选代码。请在作答期准备好所需模块，验收期间仅向 `--output` 或临时目录写入运行产物，不修改源码、解释器或输入配置。配置只保留一份公开协议，验收从受保护的同一协议读取；没有额外私有配置副本。
 
 ## 验收与计分
 
