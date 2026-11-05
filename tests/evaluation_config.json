@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "physics": {
+    "R_Cu": 2.5,
+    "R_out": 3.0,
+    "H": 25.0,
+    "k_Cu": 400.0,
+    "k_SiO2": 1.4,
+    "T_top": 380.0,
+    "T_bottom": 300.0,
+    "pde_eps": 0.0001
+  },
+  "network": {
+    "hidden_layers": 5,
+    "width": 64,
+    "activation": "SiLU"
+  },
+  "sampling": {
+    "N_f_cu": 256,
+    "N_f_ox": 384,
+    "N_b": 64,
+    "r_min_cu": 0.05,
+    "corner_each": 8,
+    "corner_depth": 1.5
+  },
+  "training": {
+    "adam_steps": 600,
+    "lbfgs_steps": 60,
+    "lr": 0.001,
+    "scheduler_factor": 0.5,
+    "scheduler_patience": 500,
+    "min_lr": 1e-06,
+    "grad_clip": 1.0,
+    "lbfgs_lr": 1.0,
+    "lbfgs_max_iter": 20,
+    "lbfgs_max_eval": 25,
+    "lbfgs_history_size": 50,
+    "tolerance_grad": 1e-09,
+    "tolerance_change": 1e-11,
+    "xpinn_residual_weight": 1.0,
+    "log_every": 100,
+    "checkpoint_every": 600
+  },
+  "evaluation": {
+    "nr": 150,
+    "nz": 250,
+    "profile_points": 500,
+    "profile_r": [
+      0.0,
+      1.25,
+      2.45,
+      2.75
+    ],
+    "section_z": 12.5,
+    "section_points": 501,
+    "loss_plot_stride": 20,
+    "line_width_pt": 0.5
+  },
+  "default_models": [
+    "StandardPINN"
+  ],
+  "default_seeds": [
+    42
+  ]
+}
